@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from kerykeion import AstrologicalSubject, SynastryAspects
+from kerykeion import AstrologicalSubject, SynastryAspects, NatalAspects
+import traceback
 
 app = FastAPI(title="Mapa Vincular — Astrological Engine")
 
@@ -40,25 +41,59 @@ def extract_planets(subject: AstrologicalSubject) -> list:
     for name in planet_names:
         if hasattr(subject, name):
             p = getattr(subject, name)
+            # Kerykeion v4: house puede ser int o string según la versión
+            house_val = getattr(p, "house", None) or getattr(p, "house_name", None)
             result.append({
-                "name": p.name,
-                "sign": p.sign,
-                "degree": round(p.position, 2),
-                "house": p.house_name,
-                "retrograde": p.retrograde,
-                # stationary: Kerykeion no lo calcula nativamente.
-                # MVP default: False. Para precisión real, comparar efemérides ±3 días
-                # y detectar velocidad < 0.1°/día.
+                "name": str(p.name),
+                "sign": str(p.sign),
+                "degree": round(float(p.position), 2),
+                "house": house_val,
+                "retrograde": bool(getattr(p, "retrograde", False)),
                 "stationary": False,
             })
     return result
 
 
 def extract_houses(subject: AstrologicalSubject) -> list:
-    return [
-        {"number": i + 1, "sign": h.sign, "degree": round(h.position, 2)}
-        for i, h in enumerate(subject.houses_list)
-    ]
+    houses = []
+    for i, h in enumerate(subject.houses_list):
+        houses.append({
+            "number": i + 1,
+            "sign": str(h.sign),
+            "degree": round(float(h.position), 2),
+        })
+    return houses
+
+
+def extract_natal_aspects(subject: AstrologicalSubject) -> list:
+    try:
+        # Kerykeion v4+: usar NatalAspects
+        natal = NatalAspects(subject)
+        aspects_list = natal.aspects_list
+        return [
+            {
+                "p1": str(a.p1_name),
+                "p2": str(a.p2_name),
+                "type": str(a.aspect),
+                "orb": round(float(a.orbit), 2),
+            }
+            for a in aspects_list
+        ]
+    except Exception:
+        # Fallback: intentar acceder directamente en versiones anteriores
+        try:
+            aspects_list = subject.aspects_list
+            return [
+                {
+                    "p1": str(a.p1_name),
+                    "p2": str(a.p2_name),
+                    "type": str(a.aspect),
+                    "orb": round(float(a.orbit), 2),
+                }
+                for a in aspects_list
+            ]
+        except Exception:
+            return []
 
 
 @app.get("/health")
@@ -68,27 +103,43 @@ def health():
 
 @app.post("/natal")
 def natal(data: BirthData):
-    subject = make_subject(data)
-    aspects_obj = subject.aspects_list if hasattr(subject, "aspects_list") else []
-    aspects = [
-        {"p1": a.p1_name, "p2": a.p2_name, "type": a.aspect, "orb": round(a.orbit, 2)}
-        for a in aspects_obj
-    ]
-    return {
-        "planets": extract_planets(subject),
-        "houses": extract_houses(subject),
-        "aspects": aspects,
-    }
+    try:
+        subject = make_subject(data)
+        return {
+            "planets": extract_planets(subject),
+            "houses": extract_houses(subject),
+            "aspects": extract_natal_aspects(subject),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        })
 
 
 @app.post("/synastry")
 def synastry(data: SynastryRequest):
-    subject_a = make_subject(data.person_a)
-    subject_b = make_subject(data.person_b)
-    syn = SynastryAspects(subject_a, subject_b)
-    return {
-        "aspects": [
-            {"p1": a.p1_name, "p2": a.p2_name, "type": a.aspect, "orb": round(a.orbit, 2)}
-            for a in syn.all_aspects
-        ]
-    }
+    try:
+        subject_a = make_subject(data.person_a)
+        subject_b = make_subject(data.person_b)
+        syn = SynastryAspects(subject_a, subject_b)
+
+        # Kerykeion v4: puede ser all_aspects o aspects
+        aspects_list = getattr(syn, "all_aspects", None) or getattr(syn, "aspects", [])
+
+        return {
+            "aspects": [
+                {
+                    "p1": str(a.p1_name),
+                    "p2": str(a.p2_name),
+                    "type": str(a.aspect),
+                    "orb": round(float(a.orbit), 2),
+                }
+                for a in aspects_list
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        })
