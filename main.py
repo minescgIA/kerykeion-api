@@ -17,6 +17,29 @@ HOUSE_ATTRS = [
     "ninth_house", "tenth_house", "eleventh_house", "twelfth_house",
 ]
 
+SIGN_ES = {
+    "Ari": "Aries", "Tau": "Tauro", "Gem": "Géminis", "Can": "Cáncer",
+    "Leo": "Leo", "Vir": "Virgo", "Lib": "Libra", "Sco": "Escorpio",
+    "Sag": "Sagitario", "Cap": "Capricornio", "Aqu": "Acuario", "Pis": "Piscis",
+    # Por si devuelve el nombre completo en inglés
+    "Aries": "Aries", "Taurus": "Tauro", "Gemini": "Géminis", "Cancer": "Cáncer",
+    "Virgo": "Virgo", "Libra": "Libra", "Scorpio": "Escorpio",
+    "Sagittarius": "Sagitario", "Capricorn": "Capricornio",
+    "Aquarius": "Acuario", "Pisces": "Piscis",
+}
+
+ASPECT_ES = {
+    "conjunction": "Conjunción", "Conjunction": "Conjunción",
+    "opposition": "Oposición", "Opposition": "Oposición",
+    "trine": "Trígono", "Trine": "Trígono",
+    "square": "Cuadratura", "Square": "Cuadratura",
+    "sextile": "Sextil", "Sextile": "Sextil",
+    "quincunx": "Quincuncio", "Quincunx": "Quincuncio",
+    "semi-sextile": "Semi-sextil", "Semi-sextile": "Semi-sextil",
+    "semi-square": "Semi-cuadratura", "Semi-square": "Semi-cuadratura",
+    "sesqui-quadrate": "Sesqui-cuadratura", "Sesqui-quadrate": "Sesqui-cuadratura",
+}
+
 
 class BirthData(BaseModel):
     name: str
@@ -43,8 +66,15 @@ def make_subject(d: BirthData) -> AstrologicalSubject:
     )
 
 
+def sign_es(raw: str) -> str:
+    return SIGN_ES.get(str(raw), str(raw))
+
+
+def aspect_es(raw: str) -> str:
+    return ASPECT_ES.get(str(raw), str(raw))
+
+
 def get_attr_safe(obj, *attrs, default=None):
-    """Intenta múltiples nombres de atributo, devuelve el primero que exista."""
     for attr in attrs:
         try:
             val = getattr(obj, attr, None)
@@ -65,7 +95,7 @@ def extract_planets(subject: AstrologicalSubject) -> list:
             house_val = get_attr_safe(p, "house", "house_name", default=None)
             result.append({
                 "name": str(p.name),
-                "sign": str(p.sign),
+                "sign": sign_es(p.sign),
                 "degree": round(float(p.position), 2),
                 "house": house_val,
                 "retrograde": bool(get_attr_safe(p, "retrograde", default=False)),
@@ -85,7 +115,7 @@ def extract_houses(subject: AstrologicalSubject) -> list:
                 continue
             houses.append({
                 "number": i + 1,
-                "sign": str(h.sign),
+                "sign": sign_es(h.sign),
                 "degree": round(float(h.position), 2),
             })
         except Exception:
@@ -93,37 +123,42 @@ def extract_houses(subject: AstrologicalSubject) -> list:
     return houses
 
 
+def format_aspects(aspects_list) -> list:
+    result = []
+    for a in aspects_list:
+        try:
+            result.append({
+                "p1": str(a.p1_name),
+                "p2": str(a.p2_name),
+                "type": aspect_es(a.aspect),
+                "orb": round(float(a.orbit), 2),
+            })
+        except Exception:
+            continue
+    return result
+
+
 def extract_natal_aspects(subject: AstrologicalSubject) -> list:
     # Intento 1: NatalAspects (Kerykeion v4+)
-    try:
-        natal = NatalAspects(subject)
-        aspects_list = natal.aspects_list
-        return [
-            {
-                "p1": str(a.p1_name),
-                "p2": str(a.p2_name),
-                "type": str(a.aspect),
-                "orb": round(float(a.orbit), 2),
-            }
-            for a in aspects_list
-        ]
-    except Exception:
-        pass
+    for attr in ["aspects_list", "relevant_aspects", "all_aspects"]:
+        try:
+            natal = NatalAspects(subject)
+            aspects_list = getattr(natal, attr, None)
+            if aspects_list:
+                return format_aspects(aspects_list)
+        except Exception:
+            continue
 
-    # Intento 2: acceso directo (versiones anteriores)
-    try:
-        aspects_list = subject.aspects_list
-        return [
-            {
-                "p1": str(a.p1_name),
-                "p2": str(a.p2_name),
-                "type": str(a.aspect),
-                "orb": round(float(a.orbit), 2),
-            }
-            for a in aspects_list
-        ]
-    except Exception:
-        return []
+    # Intento 2: acceso directo al subject
+    for attr in ["aspects_list", "relevant_aspects", "all_aspects"]:
+        try:
+            aspects_list = getattr(subject, attr, None)
+            if aspects_list:
+                return format_aspects(aspects_list)
+        except Exception:
+            continue
+
+    return []
 
 
 @app.get("/health")
@@ -147,23 +182,30 @@ def natal(data: BirthData):
         })
 
 
+@app.get("/debug/aspects")
+def debug_aspects():
+    """Endpoint temporal para ver los atributos disponibles en NatalAspects."""
+    try:
+        subject = AstrologicalSubject(
+            "Test", 1985, 7, 22, 8, 15,
+            lng=-58.38, lat=-34.60, tz_str="America/Argentina/Buenos_Aires"
+        )
+        natal = NatalAspects(subject)
+        attrs = [a for a in dir(natal) if not a.startswith("_")]
+        return {"natal_aspects_attrs": attrs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/synastry")
 def synastry(data: SynastryRequest):
     try:
         subject_a = make_subject(data.person_a)
         subject_b = make_subject(data.person_b)
         syn = SynastryAspects(subject_a, subject_b)
-        aspects_list = get_attr_safe(syn, "all_aspects", "aspects", default=[])
+        aspects_list = get_attr_safe(syn, "all_aspects", "aspects", "relevant_aspects", default=[])
         return {
-            "aspects": [
-                {
-                    "p1": str(a.p1_name),
-                    "p2": str(a.p2_name),
-                    "type": str(a.aspect),
-                    "orb": round(float(a.orbit), 2),
-                }
-                for a in aspects_list
-            ]
+            "aspects": format_aspects(aspects_list)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail={
